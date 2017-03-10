@@ -1,7 +1,5 @@
-
 """
 Zabbix Handler
-
 Provides a class responsible for the communication with Zabbix, including access to several API methods
 """
 
@@ -16,6 +14,32 @@ __version__ = "1.0"
 import urllib2
 import json
 
+from pyzabbix import ZabbixAPI, ZabbixAPIException
+
+#class Auth:
+#    def __init__(self, auth_host, public_port, admin_tenant, admin_user, admin_password):
+#
+#        self.auth_host = auth_host
+#        self.public_port = public_port
+#        self.admin_tenant = admin_tenant
+#        self.admin_user = admin_user
+#        self.admin_password = admin_password
+#
+#    def getToken(self):
+#        """
+#        Requests and returns an authentication token to be used with OpenStack's Ceilometer, Nova and RabbitMQ
+#        :return: The Keystone token assigned to these credentials
+#        """
+#        auth_request = urllib2.Request("http://"+self.auth_host+":"+self.public_port+"/v2.0/tokens")
+#        auth_request.add_header('Content-Type', 'application/json;charset=utf8')
+#        auth_request.add_header('Accept', 'application/json')
+#        auth_data = {"auth": {"tenantName": self.admin_tenant,
+#                              "passwordCredentials": {"username": self.admin_user, "password": self.admin_password}}}
+#        auth_request.add_data(json.dumps(auth_data))
+#        auth_response = urllib2.urlopen(auth_request)
+#        response_data = json.loads(auth_response.read())
+#        token = response_data['access']['token']['id']
+#        return token
 
 class ZabbixHandler:
     def __init__(self, keystone_admin_port, compute_port, admin_user, zabbix_admin_pass, zabbix_host, keystone_host,
@@ -33,8 +57,10 @@ class ZabbixHandler:
         self.token = keystone_auth.getToken()
 
     def first_run(self):
+        self.zabbix_host = 'http://' + self.zabbix_host
+        self.zapi = ZabbixAPI(self.zabbix_host)
+        self.zapi.login(self.zabbix_admin_user, self.zabbix_admin_pass)
 
-        self.api_auth = self.get_zabbix_auth()
         self.proxy_id = self.get_proxy_id()
         self.template_id = self.get_template_id()
         tenants = self.get_tenants()
@@ -46,7 +72,6 @@ class ZabbixHandler:
     def get_zabbix_auth(self):
         """
         Method used to request a session ID form Zabbix API by sending Admin credentials (user, password)
-
         :return: returns an Id to use with zabbix api calls
         """
         payload = {"jsonrpc": "2.0",
@@ -61,25 +86,18 @@ class ZabbixHandler:
     def create_template(self, group_id):
         """
         Method used to create a template.
-
         :param group_id: Receives the template group id
         :return:   returns the template id
         """
         print "Creating Template and items"
-        payload = {"jsonrpc": "2.0",
-                   "method": "template.create",
-                   "params": {
-                       "host": self.template_name,
-                       "groups": {
-                           "groupid": group_id
-                       }
-                   },
-                   "auth": self.api_auth,
-                   "id": 1
-        }
-        response = self.contact_zabbix_server(payload)
-        template_id = response['result']['templateids'][0]
-        self.create_items(template_id)
+
+        response = self.zapi.template.create(host=self.template_name, groups={"groupid": group_id})
+        if response:
+            template_id = response['templateids'][0]
+            self.create_items(template_id)
+        else:
+            raise ZabbixAPIException
+
         return template_id
 
     def create_items(self, template_id):
@@ -97,153 +115,75 @@ class ZabbixHandler:
                 value_type = 3
             else:
                 value_type = 0
-            payload = self.define_item(template_id, item, value_type)
-            self.contact_zabbix_server(payload)
-
-    def define_item(self, template_id, item, value_type):
-        """
-        Method used to define the items parameters
-
-        :param template_id:
-        :param item:
-        :param value_type:
-        :return: returns the json message to send to zabbix API
-        """
-        payload = {"jsonrpc": "2.0",
-                   "method": "item.create",
-                   "params": {
-                       "name": item,
-                       "key_": item,
-                       "hostid": template_id,
-                       "type": 2,
-                       "value_type": value_type,
-                       "history": "90",
-                       "trends": "365",
-                       "units": "",
-                       "formula": "1",
-                       "lifetime": "30",
-                       "delay": 10
-                   },
-                   "auth": self.api_auth,
-                   "id": 1}
-
-        return payload
+            self.zapi.item.create(name=item, key_=item, hostid=template_id, type=2, value_type=value_type,
+                                  history=30, trends=90, formula=1, lifetime=30, delay=10)
 
     def get_proxy_id(self):
         """
         Method used to check if the proxy exists.
-
         :return: a control value and the proxy ID if exists
         """
-        payload = {
-            "jsonrpc": "2.0",
-            "method": "proxy.get",
-            "params": {
-                "output": "extend"
-            },
-            "auth": self.api_auth,
-            "id": 1
-        }
-
-        response = self.contact_zabbix_server(payload)
-
         proxy_id = None
+        proxies = self.zapi.proxy.get(search={"host": self.zabbix_proxy_name})
 
-        for item in response['result']:
-            if item['host'] == self.zabbix_proxy_name:
-                proxy_id = item['proxyid']
-                break
-        if not proxy_id:
-            '''
-            Check if proxy exists, if not create one
-            '''
-            payload = {"jsonrpc": "2.0",
-                       "method": "proxy.create",
-                       "params": {
-                           "host": self.zabbix_proxy_name,
-                           "status": "5"
-                       },
-                       "auth": self.api_auth,
-                       "id": 1
-            }
-            response = self.contact_zabbix_server(payload)
-            proxy_id = response['result']['proxyids'][0]
-            return proxy_id
+        if proxies:
+            for item in proxies:
+                if item['host'] == self.zabbix_proxy_name:
+                    proxy_id = item['proxyid']
+                    break
+        else:
+            result = self.zapi.proxy.create(host=self.zabbix_proxy_name, status=5)
+            proxy_id = result['proxyids'][0]
 
         return proxy_id
 
     def check_host_groups(self):
         """
         This method checks if some host group exists
-
         """
         for item in self.group_list:
             tenant_name = item[0]
-            payload = {
-                "jsonrpc": "2.0",
-                "method": "hostgroup.exists",
-                "params": {
-                    "name": tenant_name
-                },
-                "auth": self.api_auth,
-                "id": 1
-            }
-            response = self.contact_zabbix_server(payload)
-            if response['result'] is False:
-                payload = {"jsonrpc": "2.0",
-                           "method": "hostgroup.create",
-                           "params": {"name": tenant_name},
-                           "auth": self.api_auth,
-                           "id": 2}
-                self.contact_zabbix_server(payload)
+            response = self.zapi.hostgroup.get(search={"name": tenant_name}, limit=1)
+            if not response:
+                self.zapi.hostgroup.create({"name": tenant_name, "id": 2})
+
 
     def check_instances(self):
         """
         Method used to verify existence of an instance / host
-
         """
         servers = None
         tenant_id = None
+
         for item in self.group_list:
             tenant_name = item[0]
             if tenant_name == 'admin':
                 tenant_id = item[1]
 
         auth_request = urllib2.Request(
-            "http://" + self.keystone_host + ":" + self.compute_port + "/v2/" + tenant_id +
+            "http://" + str(self.keystone_host) + ":" + str(self.compute_port) + "/v2.1/" + str(tenant_id) +
             "/servers/detail?all_tenants=1")
-
         auth_request.add_header('Content-Type', 'application/json;charset=utf8')
         auth_request.add_header('Accept', 'application/json')
         auth_request.add_header('X-Auth-Token', self.token)
+
         try:
             auth_response = urllib2.urlopen(auth_request)
             servers = json.loads(auth_response.read())
 
         except urllib2.HTTPError, e:
             if e.code == 401:
-                print '401'
-                print 'Check your keystone credentials\nToken refused!'
+                print 'Check your keystone credentials\nToken refused! - 401'
             elif e.code == 404:
-                print 'not found'
+                print 'Not Found - 404'
             elif e.code == 503:
-                print 'service unavailable'
+                print 'Service Unavailable - 503'
             else:
-                print 'unknown error: '
+                print 'Unknown error: ', e
 
         for item in servers[u'servers']:
-            payload = {
-                "jsonrpc": "2.0",
-                "method": "host.exists",
-                "params": {
-                    "host": item['id']
-                },
-                "auth": self.api_auth,
-                "id": 1
-            }
-            response = self.contact_zabbix_server(payload)
-
-            if response['result'] is False:
+            response = self.zapi.host.get(search={"host": item['id']}, limit=1)
+            if not response:
                 for row in self.group_list:
                     if row[1] == item['tenant_id']:
                         instance_name = item['name']
@@ -251,70 +191,56 @@ class ZabbixHandler:
                         tenant_name = row[0]
                         self.create_host(instance_name, instance_id, tenant_name)
 
+
     def create_host(self, instance_name, instance_id, tenant_name):
 
         """
         Method used to create a host in Zabbix server
-
         :param instance_name: refers to the instance name
         :param instance_id:   refers to the instance id
         :param tenant_name:   refers to the tenant name
         """
+
         group_id = self.find_group_id(tenant_name)
 
         if not instance_id in instance_name:
             instance_name = instance_name + '-' + instance_id
+            print instance_name
+        self.zapi.host.create({"host": instance_id,
+                               "name": instance_name,
+                               "proxy_hostid": self.proxy_id,
+                               "interfaces": [
+                                   {
 
-        payload = {"jsonrpc": "2.0",
-                   "method": "host.create",
-                   "params": {
-                       "host": instance_id,
-                       "name": instance_name,
-                       "proxy_hostid": self.proxy_id,
-                       "interfaces": [
-                           {
-                               "type": 1,
-                               "main": 1,
-                               "useip": 1,
-                               "ip": "127.0.0.1",
-                               "dns": "",
-                               "port": "10050"}
-                       ],
-                       "groups": [
-                           {
-                               "groupid": group_id
-                           }
-                       ],
-                       "templates": [
-                           {
-                               "templateid": self.template_id
-                           }
-                       ],
+                                       "type": 1,
+                                       "main": 1,
+                                       "useip": 1,
+                                       "ip": "127.0.0.1",
+                                       "dns": "",
+                                       "port": "10050",
+                                   }
+                               ],
+                               "groups":[
+                                   {
+                                       "groupid": group_id,
+                                   }
+                               ],
+                               "templates": [
+                                   {"templateid": self.template_id},
+                               ],
+                               })
 
-                   },
-                   "auth": self.api_auth,
-                   "id": 1}
-        self.contact_zabbix_server(payload)
 
     def find_group_id(self, tenant_name):
         """
         Method used to find the the group id of an host in Zabbix server
-
         :param tenant_name: refers to the tenant name
         :return: returns the group id that belongs to the host_group or tenant
         """
         group_id = None
-        payload = {"jsonrpc": "2.0",
-                   "method": "hostgroup.get",
-                   "params": {
-                       "output": "extend"
-                   },
-                   "auth": self.api_auth,
-                   "id": 2
-        }
-        response = self.contact_zabbix_server(payload)
-        group_list = response['result']
-        for line in group_list:
+
+        response = self.zapi.hostgroup.get(search={"output": "extend", "id": 2})
+        for line in response:
             if line['name'] == tenant_name:
                 group_id = line['groupid']
         return group_id
@@ -322,89 +248,43 @@ class ZabbixHandler:
     def get_template_id(self):
         """
         Method used to check if the template already exists. If not, creates one
-
         :return: returns the template ID
         """
         global template_id
-        payload = {
-            "jsonrpc": "2.0",
-            "method": "template.exists",
-            "params": {
-                "host": self.template_name
-            },
-            "auth": self.api_auth,
-            "id": 1
-        }
-        response = self.contact_zabbix_server(payload)
 
-        if response['result'] is True:
-
-            payload = {"jsonrpc": "2.0",
-                       "method": "template.get",
-                       "params": {
-                           "output": "extend",
-                           "filter": {
-                               "host": [
-                                   self.template_name
-                               ]
-                           }
-                       },
-                       "auth": self.api_auth,
-                       "id": 1
-            }
-            response = self.contact_zabbix_server(payload)
-            global template_id
-            for item in response['result']:
-                template_id = item['templateid']
+        response = self.zapi.template.get(search={"host": self.template_name}, limit=1)
+        if response:
+            template_id = response[0]['templateid']
         else:
             group_id = self.get_group_template_id()
             template_id = self.create_template(group_id)
+
         return template_id
 
     def get_group_template_id(self):
         """
         Method used to get the the group template id. Used to associate a template to the templates group.
-
         :return: returns the template group id
         """
         group_template_id = None
-        payload = {"jsonrpc": "2.0",
-                   "method": "hostgroup.get",
-                   "params": {
-                       "output": "extend",
-                       "filter": {
-                           "name": [
-                               "Templates"
-                           ]
-                       }
-                   },
-                   "auth": self.api_auth,
-                   "id": 1
-        }
-        response = self.contact_zabbix_server(payload)
+        response = self.zapi.hostgroup.get(search={"name": "Templates"})
 
-        for item in response['result']:
-            group_template_id = item['groupid']
+        if response:
+            for item in response:
+                group_template_id = item['groupid']
+
         return group_template_id
 
     def find_host_id(self, host):
         """
         Method used to find a host Id in Zabbix server
-
         :param host:
         :return: returns the host id
         """
         host_id = None
-        payload = {"jsonrpc": "2.0",
-                   "method": "host.get",
-                   "params": {
-                       "output": "extend"
-                   },
-                   "auth": self.api_auth,
-                   "id": 2
-        }
-        response = self.contact_zabbix_server(payload)
-        hosts_list = response['result']
+        response = self.zapi.host.get({"output": "extend", "id":2})
+
+        hosts_list = response
         for line in hosts_list:
             if host == line['host']:
                 host_id = line['hostid']
@@ -413,27 +293,18 @@ class ZabbixHandler:
     def delete_host(self, host_id):
         """
         Method used to delete a Host in Zabbix Server
-
         :param host_id: refers to the host id to delete
         """
-        payload = {"jsonrpc": "2.0",
-                   "method": "host.delete",
-                   "params": [
-                       host_id
-                   ],
-                   "auth": self.api_auth,
-                   "id": 1
-        }
-        self.contact_zabbix_server(payload)
+        self.zapi.host.delete([host_id])
+
 
     def get_tenants(self):
         """
         Method used to get a list of tenants from keystone
-
         :return: list of tenants
         """
         tenants = None
-        auth_request = urllib2.Request('http://' + self.keystone_host + ':'+self.keystone_admin_port+'/v2.0/tenants')
+        auth_request = urllib2.Request('http://' + str(self.keystone_host) + ':'+str(self.keystone_admin_port)+'/v3/projects')
         auth_request.add_header('Content-Type', 'application/json;charset=utf8')
         auth_request.add_header('Accept', 'application/json')
         auth_request.add_header('X-Auth-Token', self.token)
@@ -456,7 +327,6 @@ class ZabbixHandler:
     def get_tenant_name(self, tenants, tenant_id):
         """
         Method used to get a name of a tenant using its id
-
         :param tenants: refers to an array of tenants
         :param tenant_id: refers to a tenant id
         :return: returns a tenant name
@@ -470,13 +340,12 @@ class ZabbixHandler:
     def host_group_list(self, tenants):
         """
         Method to "fill" an array of hosts
-
         :param tenants: receive an array of tenants
         :return: parsed list of hosts [[tenant_name1, uuid1], [tenant_name2, uuid2], ..., [tenant_nameN, uuidN],]
         """
         host_group_list = []
-        for item in tenants['tenants']:
-            if not item['name'] == 'service':
+        for item in tenants['projects']:
+            if not item['name'] == 'services':
                 host_group_list.append([item['name'], item['id']])
 
         return host_group_list
@@ -484,7 +353,6 @@ class ZabbixHandler:
     def project_delete(self, tenant_id):
         """
         Method used to delete a project
-
         :param tenant_id: receives a tenant id
         """
 
@@ -500,32 +368,19 @@ class ZabbixHandler:
         Thos method deletes a host group
         :param group_id: receives the group id
         """
-        payload = {"jsonrpc": "2.0",
-                   "method": "hostgroup.delete",
-                   "params": [group_id
-                   ],
-                   "auth": self.api_auth,
-                   "id": 1
-        }
-        self.contact_zabbix_server(payload)
+        self.zapi.hostgroup.delete([group_id])
+
 
     def create_host_group(self, tenant_name):
         """
         This method is used to create host_groups. Every tenant is a host group
-
         :param tenant_name: receives teh tenant name
         """
-        payload = {"jsonrpc": "2.0",
-                   "method": "hostgroup.create",
-                   "params": {"name": tenant_name},
-                   "auth": self.api_auth,
-                   "id": 2}
-        self.contact_zabbix_server(payload)
+        self.zapi.hostgroup.create({"name": tenant_name, "id":2})
 
     def contact_zabbix_server(self, payload):
         """
         Method used to contact the Zabbix server.
-
         :param payload: refers to the json message to send to Zabbix
         :return: returns the response from the Zabbix API
         """
@@ -536,3 +391,12 @@ class ZabbixHandler:
         response = json.loads(f.read())
         f.close()
         return response
+
+
+#ks = Auth(admin_password="admin", admin_user="admin", admin_tenant="admin", auth_host="127.0.0.1", public_port="5000")
+
+#zh = ZabbixHandler(keystone_admin_port=35357, compute_port=8774, admin_user="api", zabbix_admin_pass="123qwe!E",
+#                   zabbix_host="http://zabbix.cloud.tcsbank.ru", keystone_host="127.0.0.1",
+#                   template_name="Template CEZAB", zabbix_proxy_name="cezab", keystone_auth=ks)
+#zh.first_run()
+

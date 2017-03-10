@@ -34,14 +34,16 @@ class NovaEvents:
     def nova_amq(self):
         """
         Method used to listen to nova events
-
         """
+        credentials = pika.PlainCredentials(username=self.rabbit_user, password=self.rabbit_pass)
+        parameters = pika.ConnectionParameters(host=self.rabbit_host,
+                                               port=5673,
+                                               virtual_host="/",
+                                               credentials=credentials)
+        connection = pika.BlockingConnection(parameters=parameters)
 
-        connection = pika.BlockingConnection(pika.ConnectionParameters(host=self.rabbit_host,
-                                                                       credentials=pika.PlainCredentials(
-                                                                           username=self.rabbit_user,
-                                                                           password=self.rabbit_pass)))
         channel = connection.channel()
+
         result = channel.queue_declare(exclusive=True)
         queue_name = result.method.queue
         channel.exchange_declare(exchange='nova', type='topic')

@@ -149,8 +149,12 @@ class CeilometerHandler:
         :rtype : returns the response received by the Zabbix API
         """
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
         s.connect((self.zabbix_host, int(self.zabbix_port)))
+
         s.send(payload)
+
+
         # read its response, the first five bytes are the header again
         response_header = s.recv(5, socket.MSG_WAITALL)
         if not response_header == 'ZBXD\1':
